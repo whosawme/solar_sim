@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 ggez = "0.9"
 rand = "0.8"
+kiss3d = "0.35"
+nalgebra = "0.32"  # For 3D math

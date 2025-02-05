@@ -11,6 +11,41 @@ const WINDOW_HEIGHT: f32 = 1200.0;
 const G: f32 = 1.0;
 const DT: f32 = 0.016;
 
+#[derive(Clone, Copy)]
+struct Vector3<T> {
+    x: T,
+    y: T,
+    z: T,
+}
+
+#[derive(Clone, Copy)]
+struct Point3<T> {
+    x: T,
+    y: T,
+    z: T,
+}
+
+
+impl Point3<f32> {
+    fn project_to_2d(&self, zoom: f32, rotation_x: f32, rotation_y: f32) -> Point2<f32> {
+        let cos_x = rotation_x.cos();
+        let sin_x = rotation_x.sin();
+        let cos_y = rotation_y.cos();
+        let sin_y = rotation_y.sin();
+        
+        let x1 = self.x * cos_y + self.z * sin_y;
+        let z1 = -self.x * sin_y + self.z * cos_y;
+        
+        let y2 = self.y * cos_x - z1 * sin_x;
+        let z2 = self.y * sin_x + z1 * cos_x;
+        
+        let scale = 1000.0 / (1000.0 + z2.max(-999.0)); // Prevent division by zero
+        Point2 {
+            x: WINDOW_WIDTH / 2.0 + x1 * scale * zoom,
+            y: WINDOW_HEIGHT / 2.0 + y2 * scale * zoom,
+        }
+    }
+}
 struct Button {
     rect: graphics::Rect,
     text: String,
@@ -130,64 +165,76 @@ impl Slider {
 
 #[derive(Clone)]
 struct Particle {
-    position: Point2<f32>,
-    velocity: Point2<f32>,
-    acceleration: Point2<f32>,
+    position: Point3<f32>,
+    velocity: Vector3<f32>,
+    acceleration: Vector3<f32>,
+    // position: Point2<f32>,
+    // velocity: Point2<f32>,
+    // acceleration: Point2<f32>,
     mass: f32,
     radius: f32,
 }
 
 impl Particle {
-    fn new(x: f32, y: f32, mass: f32) -> Self {
+    fn new(x: f32, y: f32, z: f32, mass: f32) -> Self {
         Particle {
-            position: Point2 { x, y },
-            velocity: Point2 { x: 0.0, y: 0.0 },
-            acceleration: Point2 { x: 0.0, y: 0.0 },
+            position: Point3 { x, y, z },
+            velocity: Vector3 { x: 0.0, y: 0.0, z: 0.0 },
+            acceleration: Vector3 { x: 0.0, y: 0.0, z: 0.0 },
             mass,
             radius: mass.powf(0.3).max(2.0),
         }
     }
 
-    fn calculate_acceleration(&mut self, particles: &[Particle]) {
-        self.acceleration = Point2 { x: 0.0, y: 0.0 };
+    fn calculate_acceleration(&mut self, particles: &[Particle], is_3d: bool) {
+        self.acceleration = Vector3 { x: 0.0, y: 0.0, z: 0.0 };
         
         for other in particles {
             if std::ptr::eq(self, other) {
                 continue;
             }
-
+    
             let dx = other.position.x - self.position.x;
             let dy = other.position.y - self.position.y;
+            let dz = other.position.z - self.position.z;
             let softening = particles[0].mass.log10();
-            let dist_squared = dx * dx + dy * dy + softening;
+            let dist_squared = dx * dx + dy * dy + dz * dz + softening;
             let dist = dist_squared.sqrt();
-
+    
             if dist < self.radius + other.radius {
                 continue;
             }
-
+    
             let force = G * other.mass / dist_squared;
             
             self.acceleration.x += force * dx / dist;
             self.acceleration.y += force * dy / dist;
+            if is_3d {
+                self.acceleration.z += force * dz / dist;
+            }
         }
     }
 
-    fn update(&mut self, dt: f32, particles: &[Particle]) {
+    fn update(&mut self, dt: f32, particles: &[Particle], is_3d: bool) {
+        self.calculate_acceleration(particles, is_3d);
         // First half-kick
         self.velocity.x += self.acceleration.x * dt * 0.5;
         self.velocity.y += self.acceleration.y * dt * 0.5;
+        self.velocity.z += self.acceleration.z * dt * 0.5;
         
         // Drift
         self.position.x += self.velocity.x * dt;
         self.position.y += self.velocity.y * dt;
+        self.position.z += self.velocity.z * dt;
         
         // Update accelerations
-        self.calculate_acceleration(particles);
+        self.calculate_acceleration(particles, is_3d);
         
         // Second half-kick
         self.velocity.x += self.acceleration.x * dt * 0.5;
         self.velocity.y += self.acceleration.y * dt * 0.5;
+        self.velocity.z += self.acceleration.z * dt * 0.5;
+        // particle.update(dt, &particles_snapshot, self.is_3d);
     }
 }
 
@@ -205,9 +252,20 @@ struct SimulationState {
     last_mouse_pos: Point2<f32>,
     adding_mass: bool,
     mass_preview: Option<Point2<f32>>,
+    // 3d stuff
+    is_3d: bool,
+    rotation_x: f32,
+    rotation_y: f32,
+    
 }
 
+
 impl SimulationState {
+    fn add_large_mass(&mut self, x: f32, y: f32) {
+        let mass = self.sliders[3].value * 100.0;
+        self.particles.push(Particle::new(x, y, 0.0, mass));
+    }
+
     fn new() -> Self {
         let mut state = SimulationState {
             particles: Vec::new(),
@@ -217,10 +275,14 @@ impl SimulationState {
             paused: true,
             zoom: 1.0,
             pan: Point2 { x: 0.0, y: 0.0 },
+            is_3d: false,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
             buttons: vec![
                 Button::new(10.0, 10.0, 100.0, 30.0, "Run/Pause"),
                 Button::new(120.0, 10.0, 100.0, 30.0, "Reset"),
                 Button::new(230.0, 10.0, 100.0, 30.0, "Add Mass"),
+                Button::new(340.0, 10.0, 100.0, 30.0, "2D/3D"),
             ],
             sliders: vec![
                 Slider::new(1.0, 0.1, 10.0, "Time Speed", 50.0, false),
@@ -240,6 +302,7 @@ impl SimulationState {
         state
     }
 
+
     fn reset(&mut self) {
         let mut rng = rand::thread_rng();
         self.particles.clear();
@@ -247,34 +310,62 @@ impl SimulationState {
         self.particles.push(Particle::new(
             WINDOW_WIDTH / 2.0,
             WINDOW_HEIGHT / 2.0,
+            0.0,
             self.sliders[6].value,
         ));
 
         for _ in 0..self.particle_count {
-            let distance = rng.gen_range(100.0..300.0);
-            let angle = rng.gen_range(0.0..2.0 * PI);
-            let x = WINDOW_WIDTH / 2.0 + distance * angle.cos();
-            let y = WINDOW_HEIGHT / 2.0 + distance * angle.sin();
+            let (x, y, z, angle, phi, theta, distance) = if self.is_3d {
+                let distance = rng.gen_range(100.0..300.0);
+                let phi = rng.gen_range(0.0..2.0 * PI);
+                let theta = rng.gen_range(0.0..PI);
+                
+                (
+                    WINDOW_WIDTH / 2.0 + distance * phi.sin() * theta.cos(),
+                    WINDOW_HEIGHT / 2.0 + distance * phi.sin() * theta.sin(),
+                    distance * phi.cos(),
+                    0.0,
+                    phi,
+                    theta,
+                    distance
+                )
+            } else {
+                let distance = rng.gen_range(100.0..300.0);
+                let angle = rng.gen_range(0.0..2.0 * PI);
+                (
+                    WINDOW_WIDTH / 2.0 + distance * angle.cos(),
+                    WINDOW_HEIGHT / 2.0 + distance * angle.sin(),
+                    0.0,
+                    angle,
+                    0.0,
+                    0.0,
+                    distance
+                )
+            };
             
             let mut particle = Particle::new(
-                x,
-                y,
-                rng.gen_range(self.initial_mass_range.0..self.initial_mass_range.1),
+                x, y, z,
+                rng.gen_range(self.initial_mass_range.0..self.initial_mass_range.1)
             );
 
             let orbital_speed = (G * self.particles[0].mass / distance).sqrt() * self.initial_velocity_multiplier;
-            particle.velocity = Point2 {
-                x: -orbital_speed * angle.sin(),
-                y: orbital_speed * angle.cos(),
+            
+            particle.velocity = if self.is_3d {
+                Vector3 {
+                    x: orbital_speed * (-phi.sin() * theta.sin()),
+                    y: orbital_speed * (phi.sin() * theta.cos()),
+                    z: orbital_speed * phi.cos(),
+                }
+            } else {
+                Vector3 {
+                    x: -orbital_speed * angle.sin(),
+                    y: orbital_speed * angle.cos(),
+                    z: 0.0,
+                }
             };
 
             self.particles.push(particle);
         }
-    }
-
-    fn add_large_mass(&mut self, x: f32, y: f32) {
-        let mass = self.sliders[3].value * 100.0;
-        self.particles.push(Particle::new(x, y, mass));
     }
 
     fn handle_mouse_click(&mut self, x: f32, y: f32) {
@@ -293,9 +384,10 @@ impl SimulationState {
                 match button.text.as_str() {
                     "Run/Pause" => should_pause = true,
                     "Reset" => clicked_reset = true,
-                        "Add Mass" => start_add_mass = true,
-                        _ => (),
-                    }
+                    "Add Mass" => start_add_mass = true,
+                    "2D/3D" => self.is_3d = !self.is_3d,
+                    _ => (),
+                }
                 }
             }
 
@@ -339,12 +431,24 @@ impl SimulationState {
         }
     }
 
+    fn handle_mouse_release(&mut self) {
+        for button in &mut self.buttons {
+            button.clicked = false;
+        }
+        self.is_panning = false;
+    }
+
     fn handle_mouse_motion(&mut self, x: f32, y: f32) {
         let current_pos = Point2 { x, y };
         
         if self.is_panning {
+            if self.is_3d {
+                self.rotation_y += (current_pos.x - self.last_mouse_pos.x) * 0.01;
+                self.rotation_x += (current_pos.y - self.last_mouse_pos.y) * 0.01;
+            } else {
             self.pan.x += (current_pos.x - self.last_mouse_pos.x) / self.zoom;
             self.pan.y += (current_pos.y - self.last_mouse_pos.y) / self.zoom;
+            }
             self.last_mouse_pos = current_pos;
         }
 
@@ -353,14 +457,9 @@ impl SimulationState {
         }
     }
 
-    fn handle_mouse_release(&mut self) {
-        for button in &mut self.buttons {
-            button.clicked = false;
-        }
-        self.is_panning = false;
-    }
 }
 
+// Update draw() to handle 3D projection:
 impl EventHandler for SimulationState {
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
         if !self.paused {
@@ -368,7 +467,7 @@ impl EventHandler for SimulationState {
             let dt = DT * time_speed;
             let particles_snapshot = self.particles.clone();
             for particle in &mut self.particles {
-                particle.update(dt, &particles_snapshot);
+                particle.update(dt, &particles_snapshot, self.is_3d);
             }
         }
         Ok(())
@@ -376,13 +475,18 @@ impl EventHandler for SimulationState {
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, Color::BLACK);
-
+    
         // Draw particles
         for particle in &self.particles {
-            let pos = Point2 {
-                x: (particle.position.x + self.pan.x) * self.zoom,
-                y: (particle.position.y + self.pan.y) * self.zoom,
+            let pos = if self.is_3d {
+                particle.position.project_to_2d(self.zoom, self.rotation_x, self.rotation_y)
+            } else {
+                Point2 {
+                    x: (particle.position.x + self.pan.x) * self.zoom,
+                    y: (particle.position.y + self.pan.y) * self.zoom,
+                }
             };
+    
             let circle = Mesh::new_circle(
                 ctx,
                 graphics::DrawMode::fill(),
@@ -393,7 +497,7 @@ impl EventHandler for SimulationState {
             )?;
             canvas.draw(&circle, DrawParam::default());
         }
-
+    
         // Draw mass preview
         if self.adding_mass {
             if let Some(pos) = self.mass_preview {
@@ -408,25 +512,27 @@ impl EventHandler for SimulationState {
                 canvas.draw(&preview_circle, DrawParam::default());
             }
         }
-
+    
         // Draw UI elements
         for button in &self.buttons {
             button.draw(ctx, &mut canvas)?;
         }
-
+    
         for slider in &self.sliders {
             slider.draw(ctx, &mut canvas)?;
         }
-
+    
         // Draw mode indicator
         let mode_text = if self.adding_mass {
             "Click to place mass"
+        } else if self.is_3d {
+            "Click and drag to rotate"
         } else {
             "Click and drag to pan"
         };
         let text = Text::new(mode_text);
         canvas.draw(&text, DrawParam::default().dest([500.0, 15.0]).color(Color::WHITE));
-
+    
         canvas.finish(ctx)?;
         Ok(())
     }
