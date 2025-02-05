@@ -201,6 +201,10 @@ struct SimulationState {
     pan: Point2<f32>,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
+    is_panning: bool,
+    last_mouse_pos: Point2<f32>,
+    adding_mass: bool,
+    mass_preview: Option<Point2<f32>>,
 }
 
 impl SimulationState {
@@ -227,6 +231,10 @@ impl SimulationState {
                 Slider::new(0.016, 0.001, 0.1, "Time Step", 250.0, false),
                 Slider::new(1000.0, 100.0, 5000.0, "Central Mass", 290.0, false),
             ],
+            is_panning: false,
+            last_mouse_pos: Point2 { x: 0.0, y: 0.0 },
+            adding_mass: false,
+            mass_preview: None,
         };
         state.reset();
         state
@@ -272,18 +280,34 @@ impl SimulationState {
     fn handle_mouse_click(&mut self, x: f32, y: f32) {
         let mouse_pos = Point2 { x, y };
         
+        // Handle UI elements first
         let mut clicked_reset = false;
         let mut should_pause = false;
-        let mut add_mass = false;
+        let mut start_add_mass = false;
         
+        // Only handle UI if not in mass-adding mode
+        if !self.adding_mass {
         for button in &mut self.buttons {
             if button.contains(mouse_pos) {
                 button.clicked = true;
                 match button.text.as_str() {
                     "Run/Pause" => should_pause = true,
                     "Reset" => clicked_reset = true,
-                    "Add Mass" => add_mass = true,
+                        "Add Mass" => start_add_mass = true,
+                        _ => (),
+                    }
+                }
+            }
+
+            for slider in &mut self.sliders {
+                if slider.handle_click(x, y) {
+                    match slider.label.as_str() {
+                        "Particles" => self.particle_count = slider.value as usize,
+                        "Velocity" => self.initial_velocity_multiplier = slider.value,
+                        "Mass" => self.initial_mass_range = (slider.value * 0.5, slider.value * 1.5),
                     _ => (),
+                }
+                    return;
                 }
             }
         }
@@ -294,19 +318,38 @@ impl SimulationState {
         if clicked_reset {
             self.reset();
         }
-        if add_mass {
-            self.add_large_mass(x, y);
+        if start_add_mass {
+            self.adding_mass = true;
+            return;
         }
 
-        for slider in &mut self.sliders {
-            if slider.handle_click(x, y) {
-                match slider.label.as_str() {
-                    "Particles" => self.particle_count = slider.value as usize,
-                    "Velocity" => self.initial_velocity_multiplier = slider.value,
-                    "Mass" => self.initial_mass_range = (slider.value * 0.5, slider.value * 1.5),
-                    _ => (),
-                }
+        // Handle mass placement or panning
+        if self.adding_mass {
+            if y > 50.0 { // Don't add mass in UI area
+                self.add_large_mass(x, y);
+                self.adding_mass = false;
+                self.mass_preview = None;
             }
+        } else {
+            // Start panning if not clicking UI
+            if y > 50.0 {
+                self.is_panning = true;
+                self.last_mouse_pos = mouse_pos;
+            }
+        }
+    }
+
+    fn handle_mouse_motion(&mut self, x: f32, y: f32) {
+        let current_pos = Point2 { x, y };
+        
+        if self.is_panning {
+            self.pan.x += (current_pos.x - self.last_mouse_pos.x) / self.zoom;
+            self.pan.y += (current_pos.y - self.last_mouse_pos.y) / self.zoom;
+            self.last_mouse_pos = current_pos;
+        }
+
+        if self.adding_mass {
+            self.mass_preview = Some(current_pos);
         }
     }
 
@@ -314,6 +357,7 @@ impl SimulationState {
         for button in &mut self.buttons {
             button.clicked = false;
         }
+        self.is_panning = false;
     }
 }
 
@@ -333,6 +377,7 @@ impl EventHandler for SimulationState {
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, Color::BLACK);
 
+        // Draw particles
         for particle in &self.particles {
             let pos = Point2 {
                 x: (particle.position.x + self.pan.x) * self.zoom,
@@ -349,6 +394,22 @@ impl EventHandler for SimulationState {
             canvas.draw(&circle, DrawParam::default());
         }
 
+        // Draw mass preview
+        if self.adding_mass {
+            if let Some(pos) = self.mass_preview {
+                let preview_circle = Mesh::new_circle(
+                    ctx,
+                    graphics::DrawMode::stroke(2.0),
+                    pos,
+                    (self.sliders[3].value * 0.3).max(2.0),
+                    0.1,
+                    Color::YELLOW,
+                )?;
+                canvas.draw(&preview_circle, DrawParam::default());
+            }
+        }
+
+        // Draw UI elements
         for button in &self.buttons {
             button.draw(ctx, &mut canvas)?;
         }
@@ -357,26 +418,21 @@ impl EventHandler for SimulationState {
             slider.draw(ctx, &mut canvas)?;
         }
 
+        // Draw mode indicator
+        let mode_text = if self.adding_mass {
+            "Click to place mass"
+        } else {
+            "Click and drag to pan"
+        };
+        let text = Text::new(mode_text);
+        canvas.draw(&text, DrawParam::default().dest([500.0, 15.0]).color(Color::WHITE));
+
         canvas.finish(ctx)?;
         Ok(())
     }
 
-    fn text_input_event(&mut self, _ctx: &mut Context, character: char) -> GameResult {
-        if let Some(text_input) = &mut self.sliders[1].text_input {
-            if character.is_numeric() || character == '\x08' {
-                if character == '\x08' {
-                    text_input.pop();
-                } else {
-                    text_input.push(character);
-                }
-                if let Ok(value) = text_input.parse::<f32>() {
-                    if value >= self.sliders[1].min && value <= self.sliders[1].max {
-                        self.sliders[1].value = value;
-                        self.particle_count = value as usize;
-                    }
-                }
-            }
-        }
+    fn mouse_motion_event(&mut self, _ctx: &mut Context, x: f32, y: f32, _dx: f32, _dy: f32) -> GameResult {
+        self.handle_mouse_motion(x, y);
         Ok(())
     }
 
@@ -408,6 +464,25 @@ impl EventHandler for SimulationState {
             Some(KeyCode::A) => self.pan.x += 10.0 / self.zoom,
             Some(KeyCode::D) => self.pan.x -= 10.0 / self.zoom,
             _ => (),
+        }
+        Ok(())
+    }
+
+    fn text_input_event(&mut self, _ctx: &mut Context, character: char) -> GameResult {
+        if let Some(text_input) = &mut self.sliders[1].text_input {
+            if character.is_numeric() || character == '\x08' {
+                if character == '\x08' {
+                    text_input.pop();
+                } else {
+                    text_input.push(character);
+                }
+                if let Ok(value) = text_input.parse::<f32>() {
+                    if value >= self.sliders[1].min && value <= self.sliders[1].max {
+                        self.sliders[1].value = value;
+                        self.particle_count = value as usize;
+                    }
+                }
+            }
         }
         Ok(())
     }
